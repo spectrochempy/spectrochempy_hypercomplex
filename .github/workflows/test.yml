@@ -22,8 +22,29 @@ jobs:
         uses: spectrochempy/spectrochempy/.github/actions/verified-pip@cdb087a24f06b8c83ea91ea036192304db9329e3
       - name: Build artifacts
         run: |
-          python -m pip install build twine
-          python -m build
+          python -m pip install "build==1.6.1" "twine==7.0.0" "setuptools==84.2.1" "wheel==0.48.0"
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          python -m build --no-isolation --outdir dist-a
+          python -m build --no-isolation --outdir dist-b
+          diff <(cd dist-a && sha256sum *.whl) <(cd dist-b && sha256sum *.whl)
+          python - <<'PY'
+          import tarfile
+          from pathlib import Path
+
+          def contents(path):
+              with tarfile.open(path) as archive:
+                  return {
+                      member.name.split("/", 1)[1]: archive.extractfile(member).read()
+                      for member in archive.getmembers()
+                      if member.isfile()
+                  }
+
+          first = contents(next(Path("dist-a").glob("*.tar.gz")))
+          second = contents(next(Path("dist-b").glob("*.tar.gz")))
+          assert first == second
+          PY
+          mkdir dist
+          cp dist-a/* dist/
           python -m twine check dist/*
       - name: Verify packaged license and runtime parity
         run: |
@@ -111,7 +132,12 @@ jobs:
           python -m pip install dist/*.whl
           python -m pip check
       - name: Run installed artifact tests
-        run: python -I -m pytest -ra tests/test_hypercomplex.py
+        run: |
+          python -I - <<'PY'
+          import importlib.util
+          assert importlib.util.find_spec("spectrochempy_nmr") is None
+          PY
+          python -I -m pytest -ra tests/test_hypercomplex.py
 
   pinned-core:
     name: Current development core

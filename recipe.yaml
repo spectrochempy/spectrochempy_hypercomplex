@@ -18,7 +18,7 @@ requirements:
   host:
     - python >=3.11
     - pip
-    - setuptools >=64
+    - setuptools >=77
   run:
     - python >=3.11
     - spectrochempy >=1.1.0,<2
@@ -28,6 +28,7 @@ requirements:
 tests:
   - script:
       - python -c "import importlib.util; assert importlib.util.find_spec('spectrochempy_hypercomplex') is not None"
+      - python -c "import importlib.metadata as m; assert any(ep.name == 'hypercomplex' for ep in m.entry_points(group='spectrochempy.plugins'))"
 
 about:
   summary: "Hypercomplex / quaternion support plugin for SpectroChemPy"
