@@ -2,13 +2,20 @@
 
 Hypercomplex / quaternion support plugin for SpectroChemPy.
 
-Provides quaternion-based dataset types, quaternion-aware processing
-operations, and utilities for working with hypercomplex NMR data.
+Provides quaternion-based dataset operations, quaternion-aware processing
+handlers, and utilities that can be reused by NMR and other SpectroChemPy
+plugins. The plugin does not depend on the NMR plugin.
 
 ## Installation
 
 ```bash
-pip install spectrochempy[hypercomplex]
+python -m pip install spectrochempy-hypercomplex
+```
+
+For NMR workflows:
+
+```bash
+python -m pip install "spectrochempy[nmr]" spectrochempy-hypercomplex
 ```
 
 ## Usage
@@ -16,18 +23,19 @@ pip install spectrochempy[hypercomplex]
 ```python
 import spectrochempy as scp
 
-# Enable hypercomplex support.
 dataset = scp.read_topspin("path/to/2rr")
 dataset.hyper.set_quaternion(inplace=True)
 ```
 
-This plugin requires SpectroChemPy.
+The public quaternion components are available as
+`dataset.hyper.RR`, `dataset.hyper.RI`, `dataset.hyper.IR` and
+`dataset.hyper.II`. The conversion utilities are exported from
+`spectrochempy_hypercomplex`.
 
 ## Development
 
 ```bash
-pip install -e .
-pip install -e plugins/spectrochempy-hypercomplex
-cd plugins/spectrochempy-hypercomplex
-python -m pytest tests/
+python -m pip install -e .
+python -m pip install pytest pytest-doctestplus
+python -m pytest tests/ -v
 ```
