@@ -1,0 +1,239 @@
+name: Candidate artifacts and integration tests
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+env:
+  CORE_PIN: 7af228b370c9742eb4eb1ace2c17fd2872468cb6
+  NMR_VERSION: 0.1.15
+
+jobs:
+  artifacts:
+    name: Build wheel and sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Secure pip bootstrap
+        uses: spectrochempy/spectrochempy/.github/actions/verified-pip@cdb087a24f06b8c83ea91ea036192304db9329e3
+      - name: Build artifacts
+        run: |
+          python -m pip install "build==1.6.1" "twine==7.0.0" "setuptools==84.2.1" "wheel==0.48.0"
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          python -m build --no-isolation --outdir dist-a
+          python -m build --no-isolation --outdir dist-b
+          diff <(cd dist-a && sha256sum *.whl) <(cd dist-b && sha256sum *.whl)
+          python - <<'PY'
+          import tarfile
+          from pathlib import Path
+
+          def contents(path):
+              with tarfile.open(path) as archive:
+                  return {
+                      member.name.split("/", 1)[1]: archive.extractfile(member).read()
+                      for member in archive.getmembers()
+                      if member.isfile()
+                  }
+
+          first = contents(next(Path("dist-a").glob("*.tar.gz")))
+          second = contents(next(Path("dist-b").glob("*.tar.gz")))
+          assert first == second
+          PY
+          mkdir dist
+          cp dist-a/* dist/
+          python -m twine check dist/*
+      - name: Verify packaged license and runtime parity
+        run: |
+          python - <<'PY'
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          source = Path("src/spectrochempy_hypercomplex")
+          wheel = next(Path("dist").glob("*.whl"))
+          sdist = next(Path("dist").glob("*.tar.gz"))
+
+          with zipfile.ZipFile(wheel) as archive:
+              license_member = next(
+                  name for name in archive.namelist() if name.endswith("/LICENSE")
+              )
+              if archive.read(license_member) != Path("LICENSE").read_bytes():
+                  sys.exit("wheel license mismatch")
+              packaged = sorted(
+                  name
+                  for name in archive.namelist()
+                  if name.startswith("spectrochempy_hypercomplex/")
+                  and name.endswith(".py")
+              )
+              for name in packaged:
+                  local = source / name.split("spectrochempy_hypercomplex/", 1)[1]
+                  if archive.read(name) != local.read_bytes():
+                      sys.exit(f"wheel runtime mismatch: {name}")
+
+          with tarfile.open(sdist) as archive:
+              license_member = next(
+                  name for name in archive.getnames() if name.endswith("/LICENSE")
+              )
+              if archive.extractfile(license_member).read() != Path("LICENSE").read_bytes():
+                  sys.exit("sdist license mismatch")
+
+          print(f"Verified license and {len(packaged)} runtime files")
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hypercomplex-dist
+          path: dist/*
+          if-no-files-found: error
+
+  conda:
+    name: Build Conda recipe
+    needs: artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build recipe with rattler-build
+        uses: prefix-dev/rattler-build-action@v0.2.39
+        with:
+          rattler-build-version: v0.77.0
+          recipe-path: recipe.yaml
+          upload-artifact: false
+          build-args: >-
+            -c spectrocat
+            -c conda-forge
+
+  released-core:
+    name: Core ${{ matrix.core }} / Python ${{ matrix.python }}
+    needs: artifacts
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+        core: ["1.1.0", "1.1.3"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Secure pip bootstrap
+        uses: spectrochempy/spectrochempy/.github/actions/verified-pip@cdb087a24f06b8c83ea91ea036192304db9329e3
+      - uses: actions/download-artifact@v8
+        with:
+          name: hypercomplex-dist
+          path: dist
+      - name: Install released core and candidate artifact
+        run: |
+          python -m pip install "spectrochempy==${{ matrix.core }}" pytest pytest-doctestplus
+          python -m pip install dist/*.whl
+          python -m pip check
+      - name: Run installed artifact tests
+        run: |
+          python -I - <<'PY'
+          import importlib.util
+          assert importlib.util.find_spec("spectrochempy_nmr") is None
+          PY
+          python -I -m pytest -ra tests/test_hypercomplex.py
+
+  pinned-core:
+    name: Current development core
+    needs: artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/checkout@v7
+        with:
+          repository: spectrochempy/spectrochempy
+          ref: ${{ env.CORE_PIN }}
+          path: core
+          fetch-depth: 0
+      - name: Secure pip bootstrap
+        uses: spectrochempy/spectrochempy/.github/actions/verified-pip@cdb087a24f06b8c83ea91ea036192304db9329e3
+      - uses: actions/download-artifact@v8
+        with:
+          name: hypercomplex-dist
+          path: dist
+      - name: Build and install pinned core and candidate artifact
+        run: |
+          python -m pip wheel --no-deps --wheel-dir core-dist ./core
+          python -m pip install core-dist/*.whl dist/*.whl pytest pytest-doctestplus
+          python -m pip check
+      - name: Run installed artifact tests
+        run: python -I -m pytest -ra tests/test_hypercomplex.py
+
+  core-only:
+    name: Core only
+    needs: artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Secure pip bootstrap
+        uses: spectrochempy/spectrochempy/.github/actions/verified-pip@cdb087a24f06b8c83ea91ea036192304db9329e3
+      - name: Install core only
+        run: python -m pip install spectrochempy==1.1.3
+      - name: Verify optional distributions are absent
+        run: |
+          python -I - <<'PY'
+          import importlib.util
+          import spectrochempy as scp
+
+          assert importlib.util.find_spec("spectrochempy_nmr") is None
+          assert importlib.util.find_spec("spectrochempy_hypercomplex") is None
+          assert not hasattr(scp.NDDataset([1.0]), "hyper")
+          PY
+
+  nmr-only:
+    name: NMR without hypercomplex
+    needs: artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Secure pip bootstrap
+        uses: spectrochempy/spectrochempy/.github/actions/verified-pip@cdb087a24f06b8c83ea91ea036192304db9329e3
+      - name: Install NMR without hypercomplex
+        run: python -m pip install spectrochempy==1.1.3 "spectrochempy-nmr==${{ env.NMR_VERSION }}"
+      - name: Verify NMR remains independent
+        run: |
+          python -I - <<'PY'
+          import importlib.util
+          import spectrochempy_nmr
+
+          assert spectrochempy_nmr.NMRPlugin
+          assert importlib.util.find_spec("spectrochempy_hypercomplex") is None
+          PY
+
+  nmr-with-hypercomplex:
+    name: NMR with hypercomplex
+    needs: artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Secure pip bootstrap
+        uses: spectrochempy/spectrochempy/.github/actions/verified-pip@cdb087a24f06b8c83ea91ea036192304db9329e3
+      - uses: actions/download-artifact@v8
+        with:
+          name: hypercomplex-dist
+          path: dist
+      - name: Install NMR and hypercomplex artifacts
+        run: |
+          python -m pip install spectrochempy==1.1.3 "spectrochempy-nmr==${{ env.NMR_VERSION }}" pytest pytest-doctestplus
+          python -m pip install dist/*.whl
+          python -m pip check
+      - name: Run combined integration tests
+        run: python -I -m pytest -ra tests/test_hypercomplex.py tests/test_nmr_integration.py
