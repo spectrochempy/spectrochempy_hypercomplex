@@ -74,9 +74,33 @@ class HyperAccessor:
     # Methods
     # ------------------------------------------------------------------
 
-    def set_quaternion(self, inplace=False):
-        """Convert the dataset data to quaternion (hypercomplex) type."""
+    def set_quaternion(self, axis=-1, inplace=False):
+        """Convert interleaved data to quaternion (hypercomplex) type.
+
+        Parameters
+        ----------
+        axis : int, default=-1
+            Axis containing the interleaved complex branches. Elements at
+            even positions are paired with the following odd positions.
+            The selected axis is reduced by half. This is a storage operation
+            only; it does not assign physical quadrature meaning.
+        inplace : bool, default=False
+            If True, modify this dataset and return None. Otherwise return a
+            converted copy.
+
+        Notes
+        -----
+        The selected coordinate is cleared because this generic operation
+        cannot infer a physically meaningful coordinate for the paired axis.
+        Other coordinates, metadata, masks and history are preserved.
+        """
         from ._quaternion import typequaternion  # noqa: PLC0415
+
+        # Preserve the historical positional ``set_quaternion(inplace)``
+        # calling convention while allowing the new explicit axis argument.
+        if isinstance(axis, bool) and inplace is False:
+            inplace = axis
+            axis = -1
 
         if typequaternion is None:
             raise RuntimeError(
@@ -84,10 +108,41 @@ class HyperAccessor:
                 "Install it with: pip install numpy-quaternion"
             )
 
+        data = self._dataset.data
+        normalized_axis = _normalize_axis(axis, data.ndim)
         new = self._dataset if inplace else self._dataset.copy()
         dtype = new._data.dtype if hasattr(new._data, "dtype") else new.dtype
+        if dtype == typequaternion:
+            if not inplace:
+                return new
+            return None
+        if data.shape[normalized_axis] % 2:
+            raise ValueError(
+                "The selected axis must have an even length for quaternion pairing"
+            )
         if dtype != typequaternion:
-            new._data = _make_quaternion(new.data)
+            mask = getattr(new, "_mask", None)
+            quaternion_data = _make_quaternion(data, normalized_axis)
+            quaternion_mask = None
+            if mask is not None and np.ndim(mask) == data.ndim:
+                even = np.take(
+                    mask,
+                    np.arange(0, data.shape[normalized_axis], 2),
+                    axis=normalized_axis,
+                )
+                odd = np.take(
+                    mask,
+                    np.arange(1, data.shape[normalized_axis], 2),
+                    axis=normalized_axis,
+                )
+                quaternion_mask = np.logical_or(even, odd)
+            if new.coordset is not None and len(new.coordset) == data.ndim:
+                coords = list(new.coordset)
+                coords[data.ndim - 1 - normalized_axis] = None
+                new.set_coordset(*coords[::-1])
+            new._data = quaternion_data
+            if quaternion_mask is not None:
+                new._mask = quaternion_mask
         if not inplace:
             return new
         return None
@@ -110,24 +165,38 @@ class HyperAccessor:
         return get_component(self._dataset.data, select)
 
 
-def _make_quaternion(data):
-    """Convert real/interleaved data to quaternion dtype."""
+def _normalize_axis(axis, ndim):
+    """Normalize an integer axis without relying on NumPy internals."""
+    if not isinstance(axis, (int, np.integer)):
+        raise TypeError(f"axis must be an integer, got {type(axis).__name__}")
+    if ndim == 0:
+        raise IndexError("axis cannot be selected from a scalar")
+    axis = int(axis)
+    if axis < 0:
+        axis += ndim
+    if axis < 0 or axis >= ndim:
+        raise IndexError(
+            f"axis {axis} is out of bounds for an array of dimension {ndim}"
+        )
+    return axis
+
+
+def _make_quaternion(data, axis=-1):
+    """Convert real/interleaved data to quaternion dtype along *axis*."""
     from ._quaternion import typequaternion  # noqa: PLC0415
 
     if data.ndim == 0:
         return data
     if typequaternion is not None and data.dtype == typequaternion:
         return data
-    if data.ndim == 1:
-        r, i = data[::2], data[1::2]
-        return as_quaternion(r, i)
-    if data.ndim == 2:
-        return as_quaternion(data[:, ::2], data[:, 1::2])
-    msg = (
-        "An array of data to be transformed to quaternion must be 2D or 1D, "
-        f"got {data.ndim}D."
-    )
-    raise ValueError(msg)
+    axis = _normalize_axis(axis, data.ndim)
+    if data.shape[axis] % 2:
+        raise ValueError(
+            "The selected axis must have an even length for quaternion pairing"
+        )
+    even = np.take(data, np.arange(0, data.shape[axis], 2), axis=axis)
+    odd = np.take(data, np.arange(1, data.shape[axis], 2), axis=axis)
+    return as_quaternion(even, odd)
 
 
 # ------------------------------------------------------------------
