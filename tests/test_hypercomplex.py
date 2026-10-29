@@ -83,6 +83,116 @@ class TestHyperAccessor:
         result = ds.hyper.set_hypercomplex()
         assert result._data.dtype.name == "quaternion"
 
+    @pytest.mark.parametrize("axis", [0, -2])
+    def test_set_quaternion_pairs_selected_axis(self, axis):
+        components = np.arange(24.0).reshape(4, 6)
+        ds = scp.NDDataset(components)
+
+        result = ds.hyper.set_quaternion(axis=axis)
+
+        assert result.data.shape == (2, 6)
+        expected = as_quaternion(components[0::2], components[1::2])
+        assert np.array_equal(result.data, expected)
+
+    def test_set_quaternion_default_pairs_last_axis(self):
+        components = np.arange(24.0).reshape(4, 6)
+        ds = scp.NDDataset(components)
+
+        result = ds.hyper.set_quaternion()
+
+        assert result.data.shape == (4, 3)
+        expected = as_quaternion(components[:, 0::2], components[:, 1::2])
+        assert np.array_equal(result.data, expected)
+
+    @pytest.mark.parametrize("axis", [-3, 2, "last"])
+    def test_set_quaternion_rejects_invalid_axis(self, axis):
+        ds = scp.NDDataset(np.ones((4, 4)))
+        with pytest.raises((IndexError, TypeError)):
+            ds.hyper.set_quaternion(axis=axis)
+
+    def test_set_quaternion_rejects_odd_selected_axis(self):
+        ds = scp.NDDataset(np.ones((3, 4)))
+        with pytest.raises(ValueError, match="even length"):
+            ds.hyper.set_quaternion(axis=0)
+
+    def test_set_quaternion_preserves_other_coords_metadata_and_mask(self):
+        data = np.arange(16.0).reshape(4, 4)
+        mask = np.zeros((4, 4), dtype=bool)
+        mask[0, 0] = True
+        mask[1, 1] = True
+        ds = scp.NDDataset(
+            np.ma.array(data, mask=mask),
+            coordset=[scp.Coord.arange(4), scp.Coord.arange(4)],
+        )
+        ds.meta["marker"] = "kept"
+        ds.units = "count"
+        ds.history = "source"
+
+        result = ds.hyper.set_quaternion(axis=0)
+
+        assert result.data.shape == (2, 4)
+        assert result.meta["marker"] == "kept"
+        assert result.units == "count"
+        assert result.history == ds.history
+        assert result.coordset[0].size == 4
+        assert result.coordset[1].size is None
+        assert result.mask.shape == (2, 4)
+        assert np.array_equal(result.mask, np.any(mask.reshape(2, 2, 4), axis=1))
+        assert ds.data.shape == (4, 4)
+
+    @pytest.mark.parametrize("axis, expected_sizes", [(0, (6, None)), (-1, (None, 4))])
+    def test_set_quaternion_handles_distinct_coordinate_lengths(
+        self, axis, expected_sizes
+    ):
+        ds = scp.NDDataset(
+            np.ones((4, 6)),
+            coordset=[scp.Coord.arange(4), scp.Coord.arange(6)],
+        )
+
+        result = ds.hyper.set_quaternion(axis=axis)
+
+        assert tuple(coord.size for coord in result.coordset) == expected_sizes
+
+    def test_set_quaternion_inplace_returns_none_and_updates_shape(self):
+        ds = scp.NDDataset(np.arange(16.0).reshape(4, 4))
+
+        result = ds.hyper.set_quaternion(axis=0, inplace=True)
+
+        assert result is None
+        assert ds.data.shape == (2, 4)
+
+    def test_set_quaternion_on_existing_quaternion_is_noop(self):
+        source = scp.NDDataset(as_quaternion(*[np.ones((2, 3)) for _ in range(4)]))
+
+        result = source.hyper.set_quaternion(axis=0)
+
+        assert result.data.shape == source.data.shape
+        assert result.hyper.is_quaternion
+
+    def test_set_quaternion_preserves_historical_positional_inplace(self):
+        ds = scp.NDDataset(np.arange(4.0))
+
+        result = ds.hyper.set_quaternion(True)
+
+        assert result is None
+        assert ds.hyper.is_quaternion
+
+    def test_set_hypercomplex_preserves_historical_alias(self):
+        ds = scp.NDDataset(np.arange(4.0))
+
+        result = ds.hyper.set_hypercomplex(True)
+
+        assert result is None
+        assert ds.hyper.is_quaternion
+
+    def test_existing_odd_sized_quaternion_is_a_noop(self):
+        source = scp.NDDataset(as_quaternion(*[np.ones(3) for _ in range(4)]))
+
+        result = source.hyper.set_quaternion()
+
+        assert result.data.shape == (3,)
+        assert result.hyper.is_quaternion
+
     def test_component_real_data_noop(self):
         ds = scp.NDDataset([1.0, 2.0, 3.0])
         result = ds.hyper.component("RR")
@@ -270,8 +380,12 @@ class TestHypercomplexDisplayRegression:
 
         rendered = ds._str_value()
         html = ds._repr_html_()
-        normalize_text = lambda s: re.sub(r"\n\s+", "\n", s)
-        normalize_html = lambda s: re.sub(r"<br/>\s+", "<br/>", s)
+
+        def normalize_text(s):
+            return re.sub(r"\n\s+", "\n", s)
+
+        def normalize_html(s):
+            return re.sub(r"<br/>\s+", "<br/>", s)
 
         for label in ["RR", "RI", "IR", "II"]:
             component = np.asarray(getattr(ds.hyper, label))
